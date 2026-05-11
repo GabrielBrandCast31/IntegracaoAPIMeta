@@ -1,0 +1,61 @@
+name: CI Backend
+
+on:
+  push:
+    branches: [main, dev, mater]
+    paths:
+      - "backend/**"
+      - ".github/workflows/ci-backend.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "backend/**"
+      - ".github/workflows/ci-backend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  ci:
+    name: Lint, typecheck, test, security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Install Python (from .python-version)
+        run: uv python install
+
+      - name: Install dependencies (frozen lockfile)
+        run: uv sync --frozen --dev
+
+      - name: Lint — ruff check
+        run: uv run ruff check .
+
+      - name: Format check — ruff format
+        run: uv run ruff format --check .
+
+      - name: Typecheck — mypy
+        run: uv run mypy .
+
+      - name: Test — pytest
+        run: uv run pytest -q --cov=. --cov-report=term-missing
+
+      - name: Security — bandit (SAST)
+        run: uv run bandit -r . -x ./.venv,./tests -ll
+
+      - name: Security — pip-audit (CVEs em dependências)
+        run: uv run pip-audit --strict

@@ -1,0 +1,50 @@
+name: CI Frontend
+
+on:
+  push:
+    branches: [main, dev, mater]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/ci-frontend.yml"
+  pull_request:
+    branches: [main, dev]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/ci-frontend.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: frontend
+
+jobs:
+  ci:
+    name: Lint, typecheck, build, audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (lockfile estrito)
+        run: npm ci
+
+      - name: Lint — eslint
+        run: npm run lint
+
+      - name: Build — tsc + vite (inclui typecheck via tsc -b)
+        run: npm run build
+
+      - name: Security — npm audit (high+)
+        run: npm audit --audit-level=high
