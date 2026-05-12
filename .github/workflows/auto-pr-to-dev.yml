@@ -1,0 +1,260 @@
+name: Auto-PR to dev
+
+on:
+  push:
+    branches:
+      - "feat/**"
+      - "fix/**"
+      - "chore/**"
+      - "docs/**"
+      - "refactor/**"
+      - "test/**"
+      - "perf/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+
+jobs:
+  open-pr:
+    name: Abrir PR para dev se ainda não existir
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Identificar branch e PR existente
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          branch="${GITHUB_REF#refs/heads/}"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+          existing=$(gh pr list \
+            --head "$branch" \
+            --base dev \
+            --state open \
+            --json number,url \
+            --jq '.[0].url // ""')
+
+          if [[ -n "$existing" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "url=$existing" >> "$GITHUB_OUTPUT"
+            echo "::notice::PR já existe: $existing"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verificar se dev existe no remoto
+        if: steps.check.outputs.skip == 'false'
+        id: base
+        run: |
+          if git ls-remote --exit-code --heads origin dev >/dev/null 2>&1; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Branch 'dev' não existe no remoto — PR não será aberto"
+          fi
+
+      - name: Garantir ref ao dev
+        if: steps.check.outputs.skip == 'false' && steps.base.outputs.ok == 'true'
+        run: git fetch origin dev:refs/remotes/origin/dev --depth=200 || true
+
+      - name: Montar título a partir do prefixo + último commit
+        if: steps.check.outputs.skip == 'false' && steps.base.outputs.ok == 'true'
+        id: title
+        run: |
+          set -euo pipefail
+          branch="${{ steps.check.outputs.branch }}"
+          prefix="${branch%%/*}"
+          subject=$(git log -1 --pretty=%s)
+
+          if [[ "$subject" == "$prefix:"* ]] || [[ "$subject" == "$prefix("* ]]; then
+            title="$subject"
+          else
+            title="$prefix: $subject"
+          fi
+          title="${title:0:70}"
+
+          {
+            echo "value<<__END__"
+            echo "$title"
+            echo "__END__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Preencher PULL_REQUEST_TEMPLATE.md (Python)
+        if: steps.check.outputs.skip == 'false' && steps.base.outputs.ok == 'true'
+        id: body
+        env:
+          BRANCH: ${{ steps.check.outputs.branch }}
+        run: |
+          set -euo pipefail
+          python3 <<'PY' > /tmp/pr_body.md
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          branch = os.environ["BRANCH"]
+          prefix = branch.split("/", 1)[0]
+
+          # Issue do nome da branch
+          m = re.match(r"^[a-z]+/(\d+)-", branch)
+          issue = m.group(1) if m else None
+
+          # Tipo
+          type_map = {
+              "feat": "Feature",
+              "fix": "Fix",
+              "chore": "Chore",
+              "docs": "Chore",
+              "refactor": "Refactor",
+              "test": "Test",
+              "perf": "Refactor",
+          }
+          type_box = type_map.get(prefix, "Chore")
+
+          # Arquivos alterados
+          try:
+              changed = subprocess.check_output(
+                  ["git", "diff", "--name-only", "origin/dev..HEAD"],
+                  text=True,
+              ).splitlines()
+          except subprocess.CalledProcessError:
+              changed = []
+
+          has_be = any(c.startswith("backend/") for c in changed)
+          has_fe = any(c.startswith("frontend/") for c in changed)
+          only_docs = changed and all(
+              c.startswith("docs/") or c.endswith(".md") for c in changed
+          )
+
+          if has_be and has_fe:
+              scope_box = "Full Stack"
+          elif has_be:
+              scope_box = "Backend"
+          elif has_fe:
+              scope_box = "Frontend"
+          elif only_docs:
+              scope_box = "Documentation"
+          else:
+              scope_box = None  # deixa todas desmarcadas; humano marca
+
+          # Sub-checkboxes de Backend
+          be_subboxes = []
+          if has_be:
+              if any("backend/app/services/" in c for c in changed):
+                  be_subboxes.append("Services")
+              if any("backend/app/schemas/" in c or "/models/" in c for c in changed):
+                  be_subboxes.append("Schemas")
+              if any("backend/app/api/" in c or "backend/app/routers/" in c for c in changed):
+                  be_subboxes.append("Controller")
+              if any("backend/app/repositories/" in c or "/repository/" in c for c in changed):
+                  be_subboxes.append("Repository")
+              if any("backend/app/core/" in c or "pyproject.toml" in c for c in changed):
+                  be_subboxes.append("Core Config")
+              if any(".github/workflows" in c for c in changed):
+                  be_subboxes.append("DevOps update (CI/CD)")
+
+          # Sub-checkboxes de Frontend
+          fe_subboxes = []
+          if has_fe:
+              if any("frontend/src/pages/" in c or "frontend/src/routes/" in c for c in changed):
+                  fe_subboxes.append("Pages")
+              if any("frontend/src/components/" in c for c in changed):
+                  fe_subboxes.append("Components")
+              if any("frontend/src/hooks/" in c for c in changed):
+                  fe_subboxes.append("Hooks")
+              if any("frontend/package.json" in c or "frontend/package-lock.json" in c for c in changed):
+                  fe_subboxes.append("Lib Update")
+              if any(".github/workflows" in c for c in changed):
+                  fe_subboxes.append("DevOps update (CI/CD)")
+
+          # Commits
+          try:
+              commits = subprocess.check_output(
+                  ["git", "log", "origin/dev..HEAD", "--pretty=format:- %s", "--no-merges"],
+                  text=True,
+              ).strip()
+          except subprocess.CalledProcessError:
+              commits = subprocess.check_output(
+                  ["git", "log", "-10", "--pretty=format:- %s", "--no-merges"],
+                  text=True,
+              ).strip()
+
+          # Template
+          template = Path(".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+
+          def check(text: str, label: str) -> str:
+              # Marca a primeira ocorrência exata "- [ ] <label>" como "- [x] <label>"
+              pattern = re.compile(rf"^- \[ \] {re.escape(label)}$", re.MULTILINE)
+              return pattern.sub(f"- [x] {label}", text, count=1)
+
+          # Marca tipo + escopo
+          template = check(template, type_box)
+          if scope_box:
+              template = check(template, scope_box)
+
+          # Marca sub-checkboxes
+          for box in be_subboxes:
+              template = check(template, box)
+          for box in fe_subboxes:
+              template = check(template, box)
+
+          # Descrição
+          desc_lines = [
+              "_Resumo auto-gerado pelo workflow a partir dos commits desta branch — revise antes do merge._",
+              "",
+              "**Commits:**",
+              commits or "- (sem commits novos detectados)",
+          ]
+          if issue:
+              desc_lines += ["", f"Closes #{issue}"]
+          description = "\n".join(desc_lines)
+          template = template.replace("This PR introduces...", description)
+
+          # How to test — substitui o bloco-exemplo por um placeholder explícito
+          how_to_test_default = (
+              "1. Run `...`\n"
+              "2. Visit `/...`\n"
+              "3. Ensure that `...` works"
+          )
+          how_to_test_replacement = (
+              "1. _Preencher antes do merge — passos reais para validar esta mudança._\n"
+              "2. Garantir CI verde\n"
+              "3. Smoke test no fluxo afetado"
+          )
+          template = template.replace(how_to_test_default, how_to_test_replacement)
+
+          # Notes — adiciona aviso de auto-geração
+          template = template.replace(
+              "N/A",
+              f"🤖 Auto-aberto por `.github/workflows/auto-pr-to-dev.yml` em push da branch `{branch}`. Revise/edite tudo antes do merge.",
+              1,
+          )
+
+          print(template)
+          PY
+
+          {
+            echo "path=/tmp/pr_body.md"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Criar PR
+        if: steps.check.outputs.skip == 'false' && steps.base.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh pr create \
+            --base dev \
+            --head "${{ steps.check.outputs.branch }}" \
+            --title "${{ steps.title.outputs.value }}" \
+            --body-file "${{ steps.body.outputs.path }}"
