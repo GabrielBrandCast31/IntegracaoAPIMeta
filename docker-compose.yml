@@ -1,0 +1,108 @@
+name: brandcast-flow
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-brandcast}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brandcast_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-brandcast}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-brandcast} -d ${POSTGRES_DB:-brandcast}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --requirepass
+      - ${REDIS_PASSWORD:-brandcast_dev}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test:
+        ["CMD", "redis-cli", "--no-auth-warning", "-a", "${REDIS_PASSWORD:-brandcast_dev}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-brandcast}:${POSTGRES_PASSWORD:-brandcast_dev}@postgres:5432/${POSTGRES_DB:-brandcast}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-brandcast_dev}@redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-change-me-openssl-rand-base64-32}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
+      # OAuth Meta — preencher em .env
+      META_APP_ID: ${META_APP_ID:-}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_REDIRECT_URI: ${META_REDIRECT_URI:-http://localhost:8000/auth/meta/callback}
+      # OAuth Google + Google Ads — preencher em .env
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/auth/google/callback}
+      GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN:-}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    depends_on:
+      backend:
+        condition: service_started
+    restart: unless-stopped
+
+  # Publishing worker — descomente quando o código de fila estiver pronto.
+  # Usa a mesma imagem do backend, command diferente (ajustar conforme arq/celery/rq).
+  #
+  # worker:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   command: ["arq", "app.workers.publishing.WorkerSettings"]
+  #   environment:
+  #     ENVIRONMENT: ${ENVIRONMENT:-development}
+  #     DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-brandcast}:${POSTGRES_PASSWORD:-brandcast_dev}@postgres:5432/${POSTGRES_DB:-brandcast}
+  #     REDIS_URL: redis://:${REDIS_PASSWORD:-brandcast_dev}@redis:6379/0
+  #     META_APP_ID: ${META_APP_ID:-}
+  #     META_APP_SECRET: ${META_APP_SECRET:-}
+  #     GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+  #     GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+  #     GOOGLE_ADS_DEVELOPER_TOKEN: ${GOOGLE_ADS_DEVELOPER_TOKEN:-}
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
