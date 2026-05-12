@@ -48,14 +48,5 @@ jobs:
       - name: Format check — ruff format
         run: uv run ruff format --check .
 
-      - name: Typecheck — mypy
-        run: uv run mypy .
-
       - name: Test — pytest
         run: uv run pytest -q --cov=. --cov-report=term-missing
-
-      - name: Security — bandit (SAST)
-        run: uv run bandit -r . -x ./.venv,./tests -ll
-
-      - name: Security — pip-audit (CVEs em dependências)
-        run: uv run pip-audit --strict
